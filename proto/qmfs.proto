@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package qmfspb;
+
+message Timestamp {
+  int64 unix_nano = 1;
+}
+
+message Checksums {
+  int64 length = 1;
+  bytes sha256 = 2;
+  int64 trimmed_length = 3;
+  bytes trimmed_sha256 = 4;
+}
+
+message EntityFileHeader {
+  string entity_id = 1;
+  string filename = 2;
+  Checksums checksums = 3;
+  Timestamp last_changed = 4;
+  string row_guid = 5;
+  bool tombstone = 6;
+  string namespace = 7;
+  bool directory = 8;
+}
+
+message Entity {
+  string entity_id = 1;
+  map<string, EntityFileHeader> files = 2;
+}
+
+message EntityFile {
+  EntityFileHeader header = 1;
+  bytes data = 2;
+}
+
+message GetEntityRequest {
+  string entity_id = 1;
+  string namespace = 2;
+}
+
+message GetEntityResponse {
+  Entity entity = 1;
+}
+
+message ReadFileRequest {
+  string entity_id = 1;
+  string filename = 2;
+  string namespace = 3;
+}
+
+message ReadFileResponse {
+  EntityFile file = 1;
+}
+
+message WriteFileRequest {
+  string namespace = 6;
+  string entity_id = 1;
+  string filename = 2;
+  bytes data = 3;
+  string old_revision_guid = 4;
+  AuthorshipMetadata authorship_metadata = 5;
+  bool directory = 7;
+}
+
+message WriteFileResponse {
+  EntityFileHeader header = 1;
+}
+
+enum DeletionType {
+  INVALID_DELETION_TYPE = 0;
+  DELETE_ANY = 1;
+  DELETE_FILE = 2;
+  DELETE_DIR = 3;
+  DELETE_NONE = 4;
+}
+
+message DeleteFileRequest {
+  string entity_id = 1;
+  string filename = 2;
+  string namespace = 3;
+  string old_revision_guid = 4;
+  AuthorshipMetadata authorship_metadata = 5;
+  DeletionType deletion_type = 6;
+}
+
+message DeleteFileResponse {
+  EntityFileHeader header = 1;
+}
+
+message EntitiesQuery {
+  message Clause {
+    message FileHasTrimmedContents {
+      string filename = 1;
+      string contents = 2;
+    }
+
+    message EntityInShard {
+      repeated string shard = 1;
+    }
+
+    oneof kind {
+      string file_exists = 1;
+      FileHasTrimmedContents file_contents = 2; 
+      string entity_id = 4;
+      EntityInShard shard = 5;
+    }
+
+    bool invert = 3;
+  }
+
+  // Query clauses. Clauses are combined with AND; all clauses must be met.
+  repeated Clause clause = 1;
+}
+
+message AuthorshipMetadata {
+  string hostname = 1;
+  string tool = 2;
+  string user = 3;
+  string qmfs_versioninfo_json = 4;
+}
+
+message QueryEntitiesRequest {
+  string namespace = 5;
+
+  oneof kind {
+    string raw_query = 1;
+    EntitiesQuery parsed_query = 2;
+    bool all = 3;
+    string has_filename = 4;
+  }
+}
+
+message QueryEntitiesResponse {
+  string entity_id = 1;
+}
+
+message ListNamespacesRequest {
+}
+
+message ListNamespacesResponse {
+  repeated string namespace = 1;
+}
+
+message SizeMetadata {
+  int64 total_rows = 2;
+  int64 active_rows = 3;
+  int64 total_stored_data_bytes = 4;
+}
+
+message ShardingKey {
+  bytes key = 1;
+}
+
+message DatabaseMetadata {
+  Timestamp last_changed = 1;
+  SizeMetadata size = 2;
+  ShardingKey sharding_key = 3;
+}
+
+message GetDatabaseMetadataRequest {
+  bool only_timestamps = 1;
+}
+
+message GetDatabaseMetadataResponse {
+  DatabaseMetadata metadata = 1;
+}
+
+service QMetadataService {
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse) {}
+  rpc QueryEntities(QueryEntitiesRequest) returns (stream QueryEntitiesResponse) {}
+  rpc GetEntity(GetEntityRequest) returns (GetEntityResponse) {}
+
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse) {}
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse) {}
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse) {}
+
+  rpc GetDatabaseMetadata(GetDatabaseMetadataRequest) returns (GetDatabaseMetadataResponse) {}
+}

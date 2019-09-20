@@ -68,10 +68,15 @@ const (
 	channelSize = 1000
 )
 
+type Options struct {
+	ChangeHook func()
+}
+
 type Database struct {
 	db *sqlitedb.Database
 
 	shardingKey []byte
+	opts        Options
 
 	stmtInsertNewRow        *sqlitedb.PreparedExec
 	stmtMarkOldRowsInactive *sqlitedb.PreparedExec
@@ -368,6 +373,8 @@ func (d *Database) writeOrDeleteFile(ctx context.Context, namespace, entityID, f
 		fields["trimmed_sha256_hash"] = nil
 	}
 
+	actuallyChanging := true
+
 	if err := writeFileTx(ctx, d.db, func(ctx context.Context, tx *sql.Tx) error {
 		var previousContents fullFileData
 		var hadPreviousContents bool
@@ -409,6 +416,8 @@ func (d *Database) writeOrDeleteFile(ctx context.Context, namespace, entityID, f
 			return status.Errorf(codes.NotFound, "File not found")
 		} else if !tombstone && hadPreviousContents {
 			if hasDataEqualTo(&previousContents, data) {
+				actuallyChanging = false
+
 				returnedHeader.LastChanged = &pb.Timestamp{
 					UnixNano: previousContents.TimestampUnixNano,
 				}
@@ -454,6 +463,10 @@ func (d *Database) writeOrDeleteFile(ctx context.Context, namespace, entityID, f
 		return nil
 	}); err != nil {
 		return nil, err
+	}
+
+	if actuallyChanging {
+		d.onChange()
 	}
 
 	logrus.Infof("writeOrDeleteFile returning: %v", returnedHeader)
@@ -665,14 +678,25 @@ func (d *Database) onStartup(ctx context.Context) error {
 	})
 }
 
-func Open(ctx context.Context, localDBFilename string) (*Database, error) {
+func (d *Database) onChange() {
+	if d.opts.ChangeHook != nil {
+		d.opts.ChangeHook()
+	}
+}
+
+func Open(ctx context.Context, localDBFilename string, opts *Options) (*Database, error) {
+	if opts == nil {
+		opts = &Options{}
+	}
+
 	db, err := schema.Open(ctx, localDBFilename)
 	if err != nil {
 		return nil, err
 	}
 
 	rv := &Database{
-		db: db,
+		db:   db,
+		opts: *opts,
 	}
 
 	if err := rv.prepareStatements(); err != nil {

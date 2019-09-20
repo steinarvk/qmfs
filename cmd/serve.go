@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steinarvk/orc"
 	"github.com/steinarvk/orclib/bundle/orcstandardserver"
+	"github.com/steinarvk/qmfs/lib/changewatch"
 	"github.com/steinarvk/qmfs/lib/loopbackgrpc"
 	"github.com/steinarvk/qmfs/lib/qmfs"
 	"github.com/steinarvk/qmfs/lib/qmfsdb"
@@ -63,48 +66,16 @@ func (l *listenerProvider) GetListenAddresses() server.ListenAddress {
 	}
 }
 
-/*
-type serveroptsProvider struct {
-	hostname    string
-	tlsProvider *selfsigned.Provider
-}
-
-func (s *serveroptsProvider) GetGRPCServerOpts() ([]grpc.ServerOption, error) {
-	certpool := x509.NewCertPool()
-
-	pemBytes, err := s.tlsProvider.GetPEM(s.hostname)
-	if err != nil {
-		return nil, err
-	}
-
-	clientConfig, err := s.tlsProvider.GetTLSConfig(s.hostname)
-	if err != nil {
-		return nil, err
-	}
-
-	logrus.Infof("Intentionally ignoring %v", pemBytes)
-
-		if ok := certpool.AppendCertsFromPEM(pemBytes); !ok {
-			return nil, fmt.Errorf("Failed to append PEM certificates for server")
-		}
-
-	creds := credentials.NewTLS(&tls.Config{
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		Certificates: clientConfig.Certificates,
-		ClientCAs:    certpool,
-	})
-
-	return []grpc.ServerOption{grpc.Creds(creds)}, nil
-}
-*/
-
 func init() {
 	provider := &selfsigned.Provider{}
 	lisProvider := &listenerProvider{
 		ch: make(chan listeningUpdate, 100),
 	}
+
 	var mountpoint string
 	var localdb string
+	var tryUnmount bool
+	var touchOnChange string
 
 	mountCmd := orc.Command(Root, orc.ModulesWithSetup(
 		func() {
@@ -146,7 +117,38 @@ func init() {
 			return err
 		}
 
-		db, err := qmfsdb.Open(ctx, pathLocalDB)
+		changewatchOpts := changewatch.Options{
+			Delay: time.Second,
+		}
+
+		if touchOnChange != "" {
+			touch := func(filename string) error {
+				t := time.Now()
+				err := os.Chtimes(filename, t, t)
+				if os.IsNotExist(err) {
+					f, err := os.OpenFile(filename, os.O_EXCL|os.O_CREATE, 0)
+					if err != nil {
+						return err
+					}
+					return f.Close()
+				}
+				return err
+			}
+
+			changewatchOpts.Action = func(ctx context.Context) error {
+				logrus.Infof("Triggering change-watch (touching %q).", touchOnChange)
+				return touch(touchOnChange)
+			}
+		}
+
+		watcher, err := changewatch.New(ctx, changewatchOpts)
+		if err != nil {
+			return err
+		}
+
+		db, err := qmfsdb.Open(ctx, pathLocalDB, &qmfsdb.Options{
+			ChangeHook: func() { watcher.OnChange() },
+		})
 		if err != nil {
 			return err
 		}
@@ -220,6 +222,31 @@ func init() {
 			return fmt.Errorf("Failed to create qmfs: %v", err)
 		}
 
+		infos, err := ioutil.ReadDir(mountpoint)
+		switch {
+		case len(infos) == 0 && err == nil:
+			logrus.Infof("Mountpoint %q is empty and valid; no issues.", mountpoint)
+
+		case len(infos) > 0:
+			var names []string
+			for _, info := range infos {
+				names = append(names, info.Name())
+			}
+			return fmt.Errorf("mountpoint %q not empty; contains files (%v) -- mount cannot succeed", mountpoint, names)
+
+		default:
+			logrus.Infof("Error accessing mountpoint %q (%v); may still be mounted", mountpoint, err)
+			if !tryUnmount {
+				return err
+			}
+
+			if err := fuse.Unmount(mountpoint); err != nil {
+				return fmt.Errorf("failed to unmount existing mount on %q: %v", mountpoint, err)
+			}
+
+			logrus.Infof("Unmounted existing filesystem on %q.", mountpoint)
+		}
+
 		logrus.Infof("Performing mount.")
 
 		fuseConn, err := fuse.Mount(
@@ -243,14 +270,13 @@ func init() {
 			logrus.Fatalf("Mount error: %v", err)
 		}
 
-		defer func() {
-			logrus.Infof("Attempting to unmount...")
-			if err := fuse.Unmount(mountpoint); err != nil {
-				logrus.Errorf("Unmount error: %v", err)
-			} else {
-				logrus.Infof("Unmount completed successfully.")
+		logrus.Infof("Ready to serve qmfs.")
+
+		if changewatchOpts.Action != nil {
+			if err := changewatchOpts.Action(ctx); err != nil {
+				return err
 			}
-		}()
+		}
 
 		for {
 			time.Sleep(time.Hour)
@@ -259,4 +285,6 @@ func init() {
 
 	mountCmd.Flags().StringVar(&mountpoint, "mountpoint", "", "path at which to mount file system")
 	mountCmd.Flags().StringVar(&localdb, "localdb", "", "filename of local database")
+	mountCmd.Flags().BoolVar(&tryUnmount, "unmount", false, "attempt unmount of old qmfs")
+	mountCmd.Flags().StringVar(&touchOnChange, "touch_on_change", "", "filename of file to touch when database changes")
 }

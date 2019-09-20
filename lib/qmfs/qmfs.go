@@ -130,18 +130,6 @@ func newServiceTree(ctx context.Context, svcdata ServiceData, client pb.QMetadat
 
 	tree.Add("pid", staticfuse.String(fmt.Sprintf("%d", os.Getpid())))
 
-	tree.Add("dummystream", readstreamfuse.Stream(ctx, func(ctx context.Context, w io.Writer) error {
-		for i := 0; i < 600; i++ {
-			_, err := fmt.Fprintf(w, "Hello %d!\n", i)
-			if err != nil {
-				logrus.Warningf("dummystream broken: %v", err)
-				return nil
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		return nil
-	}))
-
 	return tree, nil
 }
 

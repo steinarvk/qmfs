@@ -34,15 +34,22 @@ func (h *Handle) holdingLockEnsureFileWasRead(ctx context.Context) error {
 			return nil
 		}
 
+		truncated := h.file.state.IsLazilyTruncated()
+
 		currentData, currentRevision, present, err := h.file.AtomicRead(ctx)
 		if err != nil {
 			return err
 		}
 
+		if !present && truncated {
+			// Lazy truncation implies lazy creation.
+			present = true
+		}
+
 		databuf := make([]byte, len(currentData))
 		copy(databuf, currentData)
 
-		if h.trueTruncate {
+		if truncated || h.trueTruncate {
 			databuf = nil
 		}
 
@@ -55,6 +62,22 @@ func (h *Handle) holdingLockEnsureFileWasRead(ctx context.Context) error {
 
 		return nil
 	})
+}
+
+func (h *Handle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+	flush := (req.ReleaseFlags & fuse.ReleaseFlush) != 0
+	if flush {
+		logrus.Debugf("Flushing on release.")
+		if err := h.Flush(ctx, nil); err != nil {
+			logrus.Errorf("Flush on release failed: %v", err)
+		}
+	}
+
+	logrus.Debugf("Handle released: removing reference.")
+	h.file.state.RemoveRef(ctx, h)
+	logrus.Debugf("Handle release finished.")
+
+	return nil
 }
 
 var hReadAllSec = sectiontrace.New("atomicfilefuse.handle.ReadAll")
@@ -129,6 +152,8 @@ func (h *Handle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.W
 var hFlushSec = sectiontrace.New("atomicfilefuse.handle.Flush")
 
 func (h *Handle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
+	// Note: must not use fields in FlushRequest, otherwise refactor Release.
+
 	logrus.WithFields(h.file.Fields).Infof("handle.Flush()")
 	defer func() {
 		logrus.WithFields(h.file.Fields).Infof("handle.Flush() done ")
@@ -136,13 +161,23 @@ func (h *Handle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 
 	return hFlushSec.Do(ctx, func(ctx context.Context) error {
 		h.mu.Lock()
-		defer h.mu.Unlock()
 
 		if err := h.holdingLockEnsureFileWasRead(ctx); err != nil {
+			h.mu.Unlock()
 			return err
 		}
 
+		if len(h.data) == 0 {
+			logrus.WithFields(h.file.Fields).Infof("Converting flush to lazy truncation")
+
+			h.mu.Unlock()
+			return h.file.state.SetLazilyTruncated(ctx, h.file)
+		}
+
+		defer h.mu.Unlock()
+
 		if h.present && bytes.Compare(h.originalData, h.data) == 0 {
+			h.file.state.ClearLazilyTruncated()
 			logrus.WithFields(h.file.Fields).Infof("Not performing write (not modified)")
 			return nil
 		}
@@ -152,9 +187,11 @@ func (h *Handle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 			return fuse.EIO
 		}
 
-		err := h.file.AtomicWrite(ctx, h.data, h.lastRevision)
+		newLastRevision, err := h.file.AtomicWrite(ctx, h.data, h.lastRevision)
 
 		if err == nil {
+			h.lastRevision = newLastRevision
+			h.file.state.ClearLazilyTruncated()
 			h.originalData = h.data
 		}
 
@@ -166,12 +203,105 @@ func (h *Handle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	})
 }
 
+type FileState struct {
+	mu       sync.Mutex
+	m        map[*Handle]struct{}
+	truncate bool
+	file     *File
+}
+
+func (s *FileState) getFields() logrus.Fields {
+	if p := s.file; p != nil {
+		return p.Fields
+	}
+	return logrus.Fields{}
+}
+
+func (s *FileState) ClearLazilyTruncated() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	logrus.WithFields(s.getFields()).Debugf("Clearing lazy-truncate flag.")
+
+	s.truncate = false
+}
+
+func (s *FileState) SetLazilyTruncated(ctx context.Context, file *File) error {
+	s.mu.Lock()
+
+	s.file = file
+
+	if len(s.m) == 0 {
+		logrus.WithFields(s.getFields()).Infof("No handles open: eagerly truncating.")
+
+		// in this case, eagerly truncate.
+		s.mu.Unlock()
+		return file.resizeFile(ctx, 0)
+	}
+
+	defer s.mu.Unlock()
+
+	logrus.WithFields(s.getFields()).Debugf("Setting lazy-truncate flag.")
+
+	s.truncate = true
+
+	return nil
+}
+
+func (s *FileState) IsLazilyTruncated() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	logrus.WithFields(s.getFields()).Debugf("Checked lazy-truncate flag: %v", s.truncate)
+
+	return s.truncate
+}
+
+func (r *FileState) RemoveRef(ctx context.Context, h *Handle) {
+	r.mu.Lock()
+
+	_, ok := r.m[h]
+	if ok {
+		delete(r.m, h)
+	}
+
+	if len(r.m) == 0 && r.truncate {
+		r.mu.Unlock()
+		err := r.file.resizeFile(ctx, 0)
+		if err != nil {
+			logrus.Errorf("Last-minute truncate failed: %v", err)
+		}
+		logrus.Debugf("Finished last-minute truncate!")
+		return
+	}
+
+	r.mu.Unlock()
+}
+
+func (r *FileState) AddRef(h *Handle) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.m == nil {
+		r.m = map[*Handle]struct{}{}
+	}
+
+	r.m[h] = struct{}{}
+}
+
+// Set the lazily truncated flag.
+// Whenever a new handle is opened, check for it.
+// Whenever a handle performs a write, clear it.
+// When a handle is closed, if it was the last handle and the flag is set,
+//   perform a non-lazy truncation.
+
 type File struct {
+	state       FileState
 	Fields      map[string]interface{}
 	SizeLimit   int64
 	GetAttr     func(ctx context.Context, a *fuse.Attr) (bool, error)
 	AtomicRead  func(ctx context.Context) ([]byte, string, bool, error)
-	AtomicWrite func(ctx context.Context, data []byte, revision string) error
+	AtomicWrite func(ctx context.Context, data []byte, revision string) (string, error)
 }
 
 var attrSec = sectiontrace.New("atomicfilefuse.Attr")
@@ -214,11 +344,28 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 }
 
 func (f *File) open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
-	return &Handle{
+	rv := &Handle{
 		lazy:         true,
 		trueTruncate: req.Flags&fuse.OpenTruncate != 0,
 		file:         f,
-	}, nil
+	}
+	f.state.AddRef(rv)
+	return rv, nil
+}
+
+func (f *File) lazilyResizeFile(ctx context.Context, newSize int64) error {
+	if newSize > 0 {
+		return f.resizeFile(ctx, newSize)
+	}
+
+	// Lazy truncation.
+	// If there are no handles open: okay, just truncate the file.
+	// If there are handles open:
+	//   - if any of them have _not_ yet done a read, mark truncated.
+	//   - if any of them has done a read, ignore it.
+	//   - when all of these handles are released
+	//     - UNLESS one of them performs a write first, in which case cancel
+	return f.state.SetLazilyTruncated(ctx, f)
 }
 
 var resizeFileSec = sectiontrace.New("atomicfilefuse.resizeFile")
@@ -230,6 +377,7 @@ func (f *File) resizeFile(ctx context.Context, newSize int64) error {
 	}()
 
 	return resizeFileSec.Do(ctx, func(ctx context.Context) error {
+
 		var newData []byte
 		var lastRevision string
 
@@ -249,7 +397,11 @@ func (f *File) resizeFile(ctx context.Context, newSize int64) error {
 			}
 		}
 
-		return f.AtomicWrite(ctx, newData, lastRevision)
+		_, err := f.AtomicWrite(ctx, newData, lastRevision)
+		if err == nil {
+			f.state.ClearLazilyTruncated()
+		}
+		return err
 	})
 }
 
@@ -268,7 +420,7 @@ func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 		settingSize := (req.Valid & fuse.SetattrSize) != 0
 
 		if settingSize {
-			if err := f.resizeFile(ctx, int64(req.Size)); err != nil {
+			if err := f.lazilyResizeFile(ctx, int64(req.Size)); err != nil {
 				return err
 			}
 		}

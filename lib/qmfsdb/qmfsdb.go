@@ -469,7 +469,15 @@ func (d *Database) writeOrDeleteFile(ctx context.Context, namespace, entityID, f
 		d.onChange()
 	}
 
-	logrus.Infof("writeOrDeleteFile returning: %v", returnedHeader)
+	logrus.WithFields(logrus.Fields{
+		"namespace": namespace,
+		"entity_id": entityID,
+		"filename":  filename,
+		"changed":   actuallyChanging,
+		"tombstone": returnedHeader.Tombstone,
+		"dir":       returnedHeader.Directory,
+		"row_guid":  returnedHeader.RowGuid,
+	}).Infof("writeOrDeleteFile done")
 
 	return returnedHeader, nil
 }
@@ -729,18 +737,23 @@ type fullFileData struct {
 
 func hasDataEqualTo(f *fullFileData, data []byte) bool {
 	totalLen := len(f.WhitespacePrefix) + len(f.TrimmedData) + len(f.WhitespaceSuffix)
+	logrus.Infof("data is %v totalLen is %d", data, totalLen)
 	if len(data) != totalLen {
 		return false
 	}
+	logrus.Infof("cmp1")
 	if bytes.Compare(f.WhitespacePrefix, data[:len(f.WhitespacePrefix)]) != 0 {
 		return false
 	}
+	logrus.Infof("cmp2")
 	if bytes.Compare(f.WhitespaceSuffix, data[len(data)-len(f.WhitespaceSuffix):]) != 0 {
 		return false
 	}
+	logrus.Infof("cmp3")
 	if bytes.Compare(f.TrimmedData, data[len(f.WhitespacePrefix):len(data)-len(f.WhitespaceSuffix)]) != 0 {
 		return false
 	}
+	logrus.Infof("cmp4!")
 	return true
 }
 

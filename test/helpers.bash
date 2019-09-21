@@ -15,7 +15,14 @@ start_qmfs() {
   done
 }
 
+instantly_and_ungracefully_restart_qmfs() {
+  stop_qmfs
+  start_qmfs
+}
+
+
 restart_qmfs() {
+  sleep 0.1
   stop_qmfs
   start_qmfs
 }

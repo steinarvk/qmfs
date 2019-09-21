@@ -47,7 +47,7 @@ type ServiceData struct {
 	ClientCertificate *tls.Certificate
 }
 
-func newServiceTree(ctx context.Context, svcdata ServiceData, client pb.QMetadataServiceClient) (fs.Node, error) {
+func newServiceTree(ctx context.Context, svcdata ServiceData, client pb.QMetadataServiceClient, goodbyeChan chan<- error) (fs.Node, error) {
 	tree := &fs.Tree{}
 
 	grpcAddr := svcdata.AddressGRPC
@@ -135,7 +135,8 @@ func newServiceTree(ctx context.Context, svcdata ServiceData, client pb.QMetadat
 
 type Params struct {
 	ServiceData
-	Mountpoint string
+	Mountpoint   string
+	ShutdownChan chan<- error
 }
 
 type Filesystem struct {
@@ -316,7 +317,7 @@ func getFileAttribsOf(ctx context.Context, client pb.QMetadataServiceClient, nam
 	}, contentsEntry.exists, err
 }
 
-func writeFileOrDir(ctx context.Context, client pb.QMetadataServiceClient, namespace, entityID, filename string, data []byte, rev string, directory bool) error {
+func writeFileOrDir(ctx context.Context, client pb.QMetadataServiceClient, namespace, entityID, filename string, data []byte, rev string, directory bool) (string, error) {
 	authorship := &pb.AuthorshipMetadata{}
 
 	if qmfsVersioninfoJSON != "" {
@@ -340,7 +341,11 @@ func writeFileOrDir(ctx context.Context, client pb.QMetadataServiceClient, names
 		putIntoCacheAs(cacheKey, data, rowGUID, true, directory)
 	}
 
-	return err
+	if err != nil {
+		return "", err
+	}
+
+	return resp.GetHeader().GetRowGuid(), nil
 }
 
 func putIntoCacheAs(cacheKey fileCacheKey, data []byte, rowGUID string, exists bool, directory bool) {
@@ -359,6 +364,7 @@ func putIntoCacheAs(cacheKey fileCacheKey, data []byte, rowGUID string, exists b
 }
 
 func getFileNode(ctx context.Context, client pb.QMetadataServiceClient, namespace, entityID, filename string) *atomicfilefuse.File {
+	// TODO must keep all files with active handles in cache
 	f := &atomicfilefuse.File{
 		Fields: map[string]interface{}{
 			"namespace": namespace,
@@ -385,6 +391,13 @@ func getFileNode(ctx context.Context, client pb.QMetadataServiceClient, namespac
 
 		if ok {
 			entry := cached.(*fileContentsCacheEntry)
+			logrus.WithFields(logrus.Fields{
+				"namespace": namespace,
+				"entity_id": entityID,
+				"filename":  filename,
+				"exists":    entry.exists,
+				"size":      len(entry.data),
+			}).Infof("Cache hit in file contents cache")
 			return entry.data, entry.rowGUID, entry.exists, nil
 		}
 
@@ -418,7 +431,7 @@ func getFileNode(ctx context.Context, client pb.QMetadataServiceClient, namespac
 	f.AtomicRead = func(ctx context.Context) ([]byte, string, bool, error) {
 		return getFileContents(ctx)
 	}
-	f.AtomicWrite = func(ctx context.Context, data []byte, rev string) error {
+	f.AtomicWrite = func(ctx context.Context, data []byte, rev string) (string, error) {
 		return writeFileOrDir(ctx, client, namespace, entityID, filename, data, rev, false)
 	}
 	return f
@@ -530,7 +543,8 @@ func getEntityDirNode(ctx context.Context, client pb.QMetadataServiceClient, nam
 				return fuse.EIO
 			}
 			path := fullPath(filename)
-			return writeFileOrDir(ctx, client, namespace, entityID, path, nil, "", true)
+			_, err := writeFileOrDir(ctx, client, namespace, entityID, path, nil, "", true)
+			return err
 		},
 		Delete: func(ctx context.Context, filename string, dir bool) error {
 			if !qmfsquery.ValidFilename(filename) {
@@ -1028,7 +1042,7 @@ func New(ctx context.Context, client pb.QMetadataServiceClient, params Params) (
 	}
 	qmfsVersioninfoJSON = string(versioninfoJSON)
 
-	svcTree, err := newServiceTree(ctx, params.ServiceData, client)
+	svcTree, err := newServiceTree(ctx, params.ServiceData, client, params.ShutdownChan)
 	if err != nil {
 		return nil, err
 	}

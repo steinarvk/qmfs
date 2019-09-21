@@ -122,11 +122,13 @@ func init() {
 		}
 
 		if touchOnChange != "" {
+			logrus.Infof("Setting up change-watch to touch %q when database changes.", touchOnChange)
+
 			touch := func(filename string) error {
 				t := time.Now()
 				err := os.Chtimes(filename, t, t)
 				if os.IsNotExist(err) {
-					f, err := os.OpenFile(filename, os.O_EXCL|os.O_CREATE, 0)
+					f, err := os.OpenFile(filename, os.O_EXCL|os.O_CREATE, 0440)
 					if err != nil {
 						return err
 					}
@@ -207,6 +209,8 @@ func init() {
 
 		client := pb.NewQMetadataServiceClient(conn)
 
+		shutdownCh := make(chan error, 10)
+
 		q, err := qmfs.New(ctx, client, qmfs.Params{
 			ServiceData: qmfs.ServiceData{
 				Hostname:          hostname,
@@ -216,7 +220,8 @@ func init() {
 				ServerCertPEM:     certBytes,
 				ClientCertificate: &serverTLSConfig.Certificates[0],
 			},
-			Mountpoint: mountpoint,
+			Mountpoint:   mountpoint,
+			ShutdownChan: shutdownCh,
 		})
 		if err != nil {
 			return fmt.Errorf("Failed to create qmfs: %v", err)
@@ -258,29 +263,37 @@ func init() {
 		if err != nil {
 			logrus.Fatalf("Failed to set up fuse mount on %q: %v", mountpoint, err)
 		}
-		defer fuseConn.Close()
-
-		logrus.Infof("Serving mount..")
-		if err := fs.Serve(fuseConn, q); err != nil {
-			logrus.Fatalf("Failed to serve fuse mount: %v", err)
-		}
+		defer func() {
+			if fuseConn != nil {
+				fuseConn.Close()
+			}
+		}()
 
 		<-fuseConn.Ready
 		if err := fuseConn.MountError; err != nil {
 			logrus.Fatalf("Mount error: %v", err)
 		}
 
-		logrus.Infof("Ready to serve qmfs.")
+		watcher.OnChange()
 
-		if changewatchOpts.Action != nil {
-			if err := changewatchOpts.Action(ctx); err != nil {
-				return err
+		logrus.Infof("Ready to serve qmfs on %q.", mountpoint)
+
+		go func() {
+			for err := range shutdownCh {
+				logrus.Errorf("Received shutdown request: %v", err)
+				time.AfterFunc(5*time.Second, func() {
+					logrus.Fatalf("Connection stalled, force-quitting to honour shutdown request: %v", err)
+				})
+				fuseConn.Close()
+				fuseConn = nil
 			}
+		}()
+
+		if err := fs.Serve(fuseConn, q); err != nil {
+			logrus.Fatalf("Failed to serve fuse mount: %v", err)
 		}
 
-		for {
-			time.Sleep(time.Hour)
-		}
+		return nil
 	})
 
 	mountCmd.Flags().StringVar(&mountpoint, "mountpoint", "", "path at which to mount file system")

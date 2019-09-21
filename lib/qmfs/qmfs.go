@@ -145,7 +145,7 @@ type Filesystem struct {
 	root   *fs.Tree
 }
 
-func newNamespaceListNode(client pb.QMetadataServiceClient, mountpoint string, shardKey []byte) fs.Node {
+func newNamespaceListNode(client pb.QMetadataServiceClient, mountpoint string, shardKey []byte, contextBG context.Context) fs.Node {
 	return &dyndirfuse.DynamicDir{
 		CacheSize: 100,
 		Fields: map[string]interface{}{
@@ -171,7 +171,7 @@ func newNamespaceListNode(client pb.QMetadataServiceClient, mountpoint string, s
 			}
 
 			tree := &fs.Tree{}
-			if err := addRootNodesForNamespace(ctx, client, tree, namespaceName, mountpoint, shardKey); err != nil {
+			if err := addRootNodesForNamespace(ctx, client, tree, contextBG, namespaceName, mountpoint, shardKey); err != nil {
 				return nil, fuse.DT_Unknown, false, err
 			}
 			return tree, fuse.DT_Dir, true, nil
@@ -597,7 +597,7 @@ func moreFields(ms ...map[string]interface{}) map[string]interface{} {
 	return rv
 }
 
-func mkEntitiesListNode(ctx context.Context, client pb.QMetadataServiceClient, mountpoint string, shardKey []byte, fields map[string]interface{}, q *entitiesQueryer, isRoot bool) (fs.Node, error) {
+func mkEntitiesListNode(ctx context.Context, client pb.QMetadataServiceClient, mountpoint string, shardKey []byte, namespace string, fields map[string]interface{}, q *entitiesQueryer, isRoot bool) (fs.Node, error) {
 	sharder := qmfsshard.Key(shardKey)
 
 	formSelector := &fs.Tree{}
@@ -613,7 +613,11 @@ func mkEntitiesListNode(ctx context.Context, client pb.QMetadataServiceClient, m
 		return fmt.Sprintf("shard/%s/%s/%s", shards[0], shards[1], entityID)
 	}
 	mkAbsCanonicalPath := func(entityID string) string {
-		return filepath.Join(mountpoint, "entities", mkCanonicalPath(entityID))
+		var qualifyNamespace string
+		if namespace != "" {
+			qualifyNamespace = fmt.Sprintf("namespace/%s/", namespace)
+		}
+		return filepath.Join(mountpoint, qualifyNamespace+"entities", mkCanonicalPath(entityID))
 	}
 
 	report := func(entityID string, canonical bool, cb func(string, fuse.DirentType)) {
@@ -820,10 +824,10 @@ func mkEntitiesListNode(ctx context.Context, client pb.QMetadataServiceClient, m
 	return formSelector, nil
 }
 
-func addRootNodesForNamespace(ctx context.Context, client pb.QMetadataServiceClient, tree *fs.Tree, ns, mountpoint string, shardKey []byte) error {
+func addRootNodesForNamespace(shortLivedCtx context.Context, client pb.QMetadataServiceClient, tree *fs.Tree, contextBG context.Context, ns, mountpoint string, shardKey []byte) error {
 	var nextQueryID int64 = 1
 
-	listAllEntities, err := mkEntitiesListNode(ctx, client, mountpoint, shardKey, map[string]interface{}{
+	listAllEntities, err := mkEntitiesListNode(contextBG, client, mountpoint, shardKey, ns, map[string]interface{}{
 		"dir":       "entities",
 		"namespace": ns,
 	}, &entitiesQueryer{
@@ -879,7 +883,7 @@ func addRootNodesForNamespace(ctx context.Context, client pb.QMetadataServiceCli
 
 	tree.Add("entities", listAllEntities)
 
-	queryCtxBG := ctx
+	queryCtxBG := contextBG
 
 	tree.Add("query", &dyndirfuse.DynamicDir{
 		Fields: map[string]interface{}{
@@ -912,7 +916,7 @@ func addRootNodesForNamespace(ctx context.Context, client pb.QMetadataServiceCli
 				"query_id":    queryID,
 			}).Infof("Received query")
 
-			listQueryEntities, err := mkEntitiesListNode(queryCtxBG, client, mountpoint, shardKey, map[string]interface{}{
+			listQueryEntities, err := mkEntitiesListNode(queryCtxBG, client, mountpoint, shardKey, ns, map[string]interface{}{
 				"dir":         "query/instance",
 				"querystring": querystring,
 				"namespace":   ns,
@@ -1052,9 +1056,9 @@ func New(ctx context.Context, client pb.QMetadataServiceClient, params Params) (
 	tree := &fs.Tree{}
 	tree.Add("service", svcTree)
 
-	tree.Add("namespace", newNamespaceListNode(client, params.Mountpoint, shardKey))
+	tree.Add("namespace", newNamespaceListNode(client, params.Mountpoint, shardKey, ctx))
 
-	if err := addRootNodesForNamespace(ctx, client, tree, "", params.Mountpoint, shardKey); err != nil {
+	if err := addRootNodesForNamespace(ctx, client, tree, ctx, "", params.Mountpoint, shardKey); err != nil {
 		return nil, err
 	}
 

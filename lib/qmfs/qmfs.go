@@ -879,6 +879,8 @@ func addRootNodesForNamespace(ctx context.Context, client pb.QMetadataServiceCli
 
 	tree.Add("entities", listAllEntities)
 
+	queryCtxBG := ctx
+
 	tree.Add("query", &dyndirfuse.DynamicDir{
 		Fields: map[string]interface{}{
 			"dir":       "query",
@@ -889,7 +891,7 @@ func addRootNodesForNamespace(ctx context.Context, client pb.QMetadataServiceCli
 			// Always appears to be empty.
 			return nil
 		},
-		Get: func(ctx context.Context, querystring string) (fs.Node, fuse.DirentType, bool, error) {
+		Get: func(shortLivedCtx context.Context, querystring string) (fs.Node, fuse.DirentType, bool, error) {
 			parsed, err := qmfsquery.Parse(querystring)
 			if err != nil {
 				logrus.Errorf("Bad query %q: %v", querystring, err)
@@ -910,7 +912,7 @@ func addRootNodesForNamespace(ctx context.Context, client pb.QMetadataServiceCli
 				"query_id":    queryID,
 			}).Infof("Received query")
 
-			listQueryEntities, err := mkEntitiesListNode(ctx, client, mountpoint, shardKey, map[string]interface{}{
+			listQueryEntities, err := mkEntitiesListNode(queryCtxBG, client, mountpoint, shardKey, map[string]interface{}{
 				"dir":         "query/instance",
 				"querystring": querystring,
 				"namespace":   ns,

@@ -219,6 +219,10 @@ func init() {
 				AddressHTTP:       httpAddress,
 				ServerCertPEM:     certBytes,
 				ClientCertificate: &serverTLSConfig.Certificates[0],
+				ForbiddenFilenameREs: []string{
+					".*[.]sw[a-z]$",
+					"^[.]Trash$",
+				},
 			},
 			Mountpoint:   mountpoint,
 			ShutdownChan: shutdownCh,

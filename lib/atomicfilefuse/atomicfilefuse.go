@@ -149,6 +149,13 @@ func (h *Handle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.W
 	})
 }
 
+func (h *Handle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	//  is this ever called? seems like bazil defines Fsync on Node not Handle but that may be a bug.
+	// treat it like Flush.
+	logrus.Warningf("Received Fsync on handle; redirecting to Flush")
+	return h.Flush(ctx, nil)
+}
+
 var hFlushSec = sectiontrace.New("atomicfilefuse.handle.Flush")
 
 func (h *Handle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
@@ -427,4 +434,9 @@ func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 
 		return nil
 	})
+}
+
+func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	logrus.Warningf("Received Fsync on file; ignoring.")
+	return nil
 }

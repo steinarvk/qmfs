@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/sirupsen/logrus"
+	"github.com/steinarvk/linetool/lib/lines"
 	"github.com/steinarvk/orclib/lib/versioninfo"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -39,12 +41,13 @@ import (
 var qmfsVersioninfoJSON string
 
 type ServiceData struct {
-	Hostname          string
-	DatabasePath      string
-	AddressGRPC       string
-	AddressHTTP       string
-	ServerCertPEM     []byte
-	ClientCertificate *tls.Certificate
+	Hostname             string
+	DatabasePath         string
+	AddressGRPC          string
+	AddressHTTP          string
+	ServerCertPEM        []byte
+	ClientCertificate    *tls.Certificate
+	ForbiddenFilenameREs []string
 }
 
 func newServiceTree(ctx context.Context, svcdata ServiceData, client pb.QMetadataServiceClient, goodbyeChan chan<- error) (fs.Node, error) {
@@ -91,6 +94,8 @@ func newServiceTree(ctx context.Context, svcdata ServiceData, client pb.QMetadat
 
 		tree.Add("client_key.pem", staticfuse.Bytes(clientKeyPEM))
 	}
+
+	tree.Add("bad_filenames", staticfuse.Bytes(lines.AsBytes(svcdata.ForbiddenFilenameREs)))
 
 	startupTime := time.Now()
 	tree.Add("startup", staticfuse.String(fmt.Sprintf("%d", startupTime.UnixNano())))
@@ -145,7 +150,7 @@ type Filesystem struct {
 	root   *fs.Tree
 }
 
-func newNamespaceListNode(client pb.QMetadataServiceClient, mountpoint string, shardKey []byte, contextBG context.Context) fs.Node {
+func newNamespaceListNode(client pb.QMetadataServiceClient, mountpoint string, shardKey []byte, contextBG context.Context, isFilenameBad func(string) bool) fs.Node {
 	return &dyndirfuse.DynamicDir{
 		CacheSize: 100,
 		Fields: map[string]interface{}{
@@ -171,7 +176,7 @@ func newNamespaceListNode(client pb.QMetadataServiceClient, mountpoint string, s
 			}
 
 			tree := &fs.Tree{}
-			if err := addRootNodesForNamespace(ctx, client, tree, contextBG, namespaceName, mountpoint, shardKey); err != nil {
+			if err := addRootNodesForNamespace(ctx, client, tree, contextBG, namespaceName, mountpoint, shardKey, isFilenameBad); err != nil {
 				return nil, fuse.DT_Unknown, false, err
 			}
 			return tree, fuse.DT_Dir, true, nil
@@ -419,7 +424,8 @@ func getFileNode(ctx context.Context, client pb.QMetadataServiceClient, namespac
 		}
 
 		if a != nil {
-			a.Mode = 0
+			a.Valid = 0
+			a.Mode = 0660
 			if attribs.directory {
 				a.Mode |= os.ModeDir
 			}
@@ -432,16 +438,17 @@ func getFileNode(ctx context.Context, client pb.QMetadataServiceClient, namespac
 		return getFileContents(ctx)
 	}
 	f.AtomicWrite = func(ctx context.Context, data []byte, rev string) (string, error) {
-		return writeFileOrDir(ctx, client, namespace, entityID, filename, data, rev, false)
+		rev, err := writeFileOrDir(ctx, client, namespace, entityID, filename, data, rev, false)
+		return rev, err
 	}
 	return f
 }
 
-func getEntityRootNode(ctx context.Context, client pb.QMetadataServiceClient, namespace, entityID string) fs.Node {
-	return getEntityDirNode(ctx, client, namespace, entityID, "")
+func getEntityRootNode(ctx context.Context, client pb.QMetadataServiceClient, namespace, entityID string, isFilenameBad func(string) bool) fs.Node {
+	return getEntityDirNode(ctx, client, namespace, entityID, "", isFilenameBad)
 }
 
-func getEntityDirNode(ctx context.Context, client pb.QMetadataServiceClient, namespace, entityID, parentdir string) fs.Node {
+func getEntityDirNode(ctx context.Context, client pb.QMetadataServiceClient, namespace, entityID, parentdir string, isFilenameBad func(string) bool) fs.Node {
 	cacheSize := 1000
 	if parentdir != "" {
 		cacheSize = 0
@@ -517,6 +524,14 @@ func getEntityDirNode(ctx context.Context, client pb.QMetadataServiceClient, nam
 				return nil, fuse.DT_Unknown, false, fuse.ENOENT
 			}
 
+			if isFilenameBad(filename) {
+				logrus.WithFields(logrus.Fields{
+					"filename": filename,
+				}).Warningf("Refusing to allow file")
+
+				return nil, fuse.DT_Unknown, false, fuse.EIO
+			}
+
 			path := fullPath(filename)
 
 			dir, err := isDir(ctx, path)
@@ -525,7 +540,7 @@ func getEntityDirNode(ctx context.Context, client pb.QMetadataServiceClient, nam
 			}
 
 			if dir {
-				return getEntityDirNode(ctx, client, namespace, entityID, path), fuse.DT_Dir, true, nil
+				return getEntityDirNode(ctx, client, namespace, entityID, path, isFilenameBad), fuse.DT_Dir, true, nil
 			}
 
 			node := getFileNode(ctx, client, namespace, entityID, path)
@@ -824,7 +839,7 @@ func mkEntitiesListNode(ctx context.Context, client pb.QMetadataServiceClient, m
 	return formSelector, nil
 }
 
-func addRootNodesForNamespace(shortLivedCtx context.Context, client pb.QMetadataServiceClient, tree *fs.Tree, contextBG context.Context, ns, mountpoint string, shardKey []byte) error {
+func addRootNodesForNamespace(shortLivedCtx context.Context, client pb.QMetadataServiceClient, tree *fs.Tree, contextBG context.Context, ns, mountpoint string, shardKey []byte, isFilenameBad func(string) bool) error {
 	var nextQueryID int64 = 1
 
 	listAllEntities, err := mkEntitiesListNode(contextBG, client, mountpoint, shardKey, ns, map[string]interface{}{
@@ -835,7 +850,7 @@ func addRootNodesForNamespace(shortLivedCtx context.Context, client pb.QMetadata
 			if !qmfsquery.ValidFilename(entityID) {
 				return nil, false, fmt.Errorf("invalid filename")
 			}
-			node := getEntityRootNode(ctx, client, ns, entityID)
+			node := getEntityRootNode(ctx, client, ns, entityID, isFilenameBad)
 			return node, true, nil
 		},
 		listAll: func(ctx context.Context, shards []string, report func(string) error) error {
@@ -1042,6 +1057,24 @@ func New(ctx context.Context, client pb.QMetadataServiceClient, params Params) (
 		return nil, fmt.Errorf("no sharding key provided")
 	}
 
+	var badFilenameREs []*regexp.Regexp
+	for _, s := range params.ServiceData.ForbiddenFilenameREs {
+		compiled, err := regexp.Compile(s)
+		if err != nil {
+			return nil, fmt.Errorf("bad forbidden-filename regex %q: %v", s, err)
+		}
+		badFilenameREs = append(badFilenameREs, compiled)
+	}
+
+	isFilenameBad := func(filename string) bool {
+		for _, pat := range badFilenameREs {
+			if pat.MatchString(filename) {
+				return true
+			}
+		}
+		return false
+	}
+
 	versioninfoJSON, err := json.MarshalIndent(versioninfo.MakeJSON(), "", "")
 	if err != nil {
 		return nil, err
@@ -1056,9 +1089,9 @@ func New(ctx context.Context, client pb.QMetadataServiceClient, params Params) (
 	tree := &fs.Tree{}
 	tree.Add("service", svcTree)
 
-	tree.Add("namespace", newNamespaceListNode(client, params.Mountpoint, shardKey, ctx))
+	tree.Add("namespace", newNamespaceListNode(client, params.Mountpoint, shardKey, ctx, isFilenameBad))
 
-	if err := addRootNodesForNamespace(ctx, client, tree, ctx, "", params.Mountpoint, shardKey); err != nil {
+	if err := addRootNodesForNamespace(ctx, client, tree, ctx, "", params.Mountpoint, shardKey, isFilenameBad); err != nil {
 		return nil, err
 	}
 

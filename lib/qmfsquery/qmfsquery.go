@@ -2,6 +2,7 @@ package qmfsquery
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -37,6 +38,12 @@ func EntityIDEquals(entityID string) *pb.EntitiesQuery_Clause {
 }
 
 func parseClause(clausestring string) (*pb.EntitiesQuery_Clause, error) {
+	unescaped, err := url.PathUnescape(clausestring)
+	if err != nil {
+		return nil, err
+	}
+	clausestring = unescaped
+
 	clause := &pb.EntitiesQuery_Clause{}
 	if strings.HasPrefix(clausestring, "-") {
 		clausestring = clausestring[1:]
@@ -50,7 +57,7 @@ func parseClause(clausestring string) (*pb.EntitiesQuery_Clause, error) {
 		filename := keyval[0]
 		contents := keyval[1]
 
-		if !ValidFilename(filename) {
+		if !ValidPath(filename) {
 			return nil, fmt.Errorf("invalid filename: %q", filename)
 		}
 
@@ -66,7 +73,7 @@ func parseClause(clausestring string) (*pb.EntitiesQuery_Clause, error) {
 
 	filename := clausestring
 
-	if !ValidFilename(filename) {
+	if !ValidPath(filename) {
 		return nil, fmt.Errorf("invalid filename: %q", filename)
 	}
 

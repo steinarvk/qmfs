@@ -99,11 +99,16 @@ message EntitiesQuery {
       repeated string shard = 1;
     }
 
+    message RandomSelection {
+      int32 number = 1;
+    }
+
     oneof kind {
       string file_exists = 1;
       FileHasTrimmedContents file_contents = 2; 
       string entity_id = 4;
       EntityInShard shard = 5;
+      RandomSelection random = 6;
     }
 
     bool invert = 3;

@@ -985,6 +985,8 @@ FROM items AS base
 		whereClauses = append(whereClauses, condexprRepl)
 	}
 
+	var orderLimitSection string
+
 	nextVar := 1
 	assocVariable := func(value interface{}) string {
 		varName := fmt.Sprintf("var%d", nextVar)
@@ -1037,6 +1039,25 @@ FROM items AS base
 				}
 			}
 
+		case *pb.EntitiesQuery_Clause_Random:
+			n := int(value.Random.GetNumber())
+
+			if n <= 0 {
+				return nil, nil, nil, fmt.Errorf("query error: random[] cannot take a non-positive value, got %d", n)
+			}
+
+			if clause.Invert {
+				return nil, nil, nil, fmt.Errorf("query error: random[] cannot be inverted")
+			}
+
+			if orderLimitSection != "" {
+				return nil, nil, nil, fmt.Errorf("query error: cannot have multiple selection clauses")
+			}
+
+			numVar := assocVariable(fmt.Sprintf("%d", n))
+
+			orderLimitSection = "ORDER BY RANDOM() LIMIT " + numVar
+
 		case *pb.EntitiesQuery_Clause_FileContents:
 			contents := []byte(value.FileContents.GetContents())
 			filename := value.FileContents.GetFilename()
@@ -1073,7 +1094,7 @@ FROM items AS base
 		}
 	}
 
-	fullSQL := sqlquery + "\nWHERE\n" + andJoinSQL(whereClauses)
+	fullSQL := sqlquery + "\nWHERE\n" + andJoinSQL(whereClauses) + "\n" + orderLimitSection
 
 	logrus.Infof("Final SQL: %s", fullSQL)
 	logrus.Infof("Final fields: %v", moreArgs)

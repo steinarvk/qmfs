@@ -92,6 +92,19 @@ func parseFunctionClause(clausestring string, clause *pb.EntitiesQuery_Clause) e
 			},
 		}
 
+	case "random":
+		args, err := parseArgs(simp.args, "i")
+		if err != nil {
+			return err
+		}
+		n := args[0].(int)
+
+		clause.Kind = &pb.EntitiesQuery_Clause_Random{
+			Random: &pb.EntitiesQuery_Clause_RandomSelection{
+				Number: int32(n),
+			},
+		}
+
 	default:
 		return fmt.Errorf("unknown query function %q", simp.functionName)
 	}

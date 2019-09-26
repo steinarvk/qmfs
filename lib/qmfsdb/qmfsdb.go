@@ -1052,13 +1052,19 @@ FROM items AS base
 
 			trimmedData := string(contents)
 
-			varTrimmedData := assocVariable([]byte(trimmedData))
+			suffix := ""
+			if len(trimmedData) > 0 {
+				varTrimmedData := assocVariable([]byte(trimmedData))
+				suffix = " AND {tbl}.trimmed_data = " + varTrimmedData
+			} else {
+				suffix = " AND {tbl}.trimmed_data IS NULL "
+			}
 
 			addCondition(
 				"{tbl}.filename = "+varFilename+
 					" AND {tbl}.trimmed_data_length = "+varTrimmedLength+
 					" AND {tbl}.trimmed_sha256_hash = "+varTrimmedSha256+
-					" AND {tbl}.trimmed_data = "+varTrimmedData,
+					suffix,
 				"{tbl}.row_guid IS NOT NULL",
 				clause.Invert)
 

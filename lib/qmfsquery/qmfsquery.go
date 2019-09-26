@@ -73,19 +73,17 @@ func parseArgs(unparsedArgs []string, spec string) ([]interface{}, error) {
 	return rv, nil
 }
 
-func parseFunctionClause(clausestring string) (*pb.EntitiesQuery_Clause, error) {
+func parseFunctionClause(clausestring string, clause *pb.EntitiesQuery_Clause) error {
 	simp, err := parseSimpleFunction(clausestring)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	clause := &pb.EntitiesQuery_Clause{}
 
 	switch simp.functionName {
 	case "blank":
 		args, err := parseArgs(simp.args, "f")
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		clause.Kind = &pb.EntitiesQuery_Clause_FileContents{
@@ -95,10 +93,10 @@ func parseFunctionClause(clausestring string) (*pb.EntitiesQuery_Clause, error) 
 		}
 
 	default:
-		return nil, fmt.Errorf("unknown query function %q", simp.functionName)
+		return fmt.Errorf("unknown query function %q", simp.functionName)
 	}
 
-	return clause, nil
+	return nil
 }
 
 func parseClause(clausestring string) (*pb.EntitiesQuery_Clause, error) {
@@ -115,7 +113,10 @@ func parseClause(clausestring string) (*pb.EntitiesQuery_Clause, error) {
 	}
 
 	if strings.Contains(clausestring, "[") {
-		return parseFunctionClause(clausestring)
+		if err := parseFunctionClause(clausestring, clause); err != nil {
+			return nil, err
+		}
+		return clause, nil
 	}
 
 	sep := "="

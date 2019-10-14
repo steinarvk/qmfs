@@ -1102,6 +1102,7 @@ FROM items AS base
 	var err error
 	prepared := d.db.PrepareQuery(&err, "qmfsdb-dynamic-entities-query", fullSQL)
 	if err != nil {
+		logrus.Infof("SQL error (query was: %s): %v", fullSQL, err)
 		return nil, nil, nil, err
 	}
 

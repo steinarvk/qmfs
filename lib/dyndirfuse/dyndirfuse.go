@@ -65,6 +65,7 @@ func (d *DynamicDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 				Name: name,
 			})
 		}); err != nil {
+			logrus.WithFields(d.Fields).Warningf("ReadDirAll() listing failed: %v", err)
 			return err
 		}
 
@@ -72,7 +73,17 @@ func (d *DynamicDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		return nil
 	})
 
-	logrus.WithFields(d.Fields).Infof("ReadDirAll()")
+	if err == context.Canceled || err == context.DeadlineExceeded || status.Code(err) == codes.Canceled || status.Code(err) == codes.DeadlineExceeded {
+		logrus.WithFields(d.Fields).Errorf("ReadDirAll() failed with cancellation: %v", err)
+		return nil, fuse.EINTR
+	}
+
+	if err != nil {
+		logrus.WithFields(d.Fields).Errorf("ReadDirAll() failed: %v", err)
+		return nil, fuse.EIO
+	} else {
+		logrus.WithFields(d.Fields).Infof("ReadDirAll(): OK")
+	}
 	return rv, err
 }
 

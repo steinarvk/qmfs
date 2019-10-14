@@ -159,6 +159,7 @@ func newNamespaceListNode(client pb.QMetadataServiceClient, mountpoint string, s
 		List: func(ctx context.Context, cb func(string, fuse.DirentType)) error {
 			resp, err := client.ListNamespaces(ctx, &pb.ListNamespacesRequest{})
 			if err != nil {
+				logrus.Errorf("Error on listing namespaces: %v", err)
 				return err
 			}
 
@@ -500,6 +501,7 @@ func getEntityDirNode(ctx context.Context, client pb.QMetadataServiceClient, nam
 				EntityId:  entityID,
 			})
 			if err != nil {
+				logrus.Errorf("Error on getting entity: %v", err)
 				return err
 			}
 
@@ -695,6 +697,7 @@ func mkEntitiesListNode(ctx context.Context, client pb.QMetadataServiceClient, m
 				return q.listAll(ctx, shards, func(entityID string) error {
 					ok, err := hasShards(shards, entityID)
 					if err != nil {
+						logrus.Errorf("Query hasShards() error for shards=%v entityID=%q: %v", shards, entityID, err)
 						return err
 					}
 					if ok {

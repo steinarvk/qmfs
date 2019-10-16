@@ -13,10 +13,10 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/sirupsen/logrus"
+	"github.com/steinarvk/orclib/lib/sqlitedb"
 	"github.com/steinarvk/orclib/lib/uniqueid"
 	"github.com/steinarvk/qmfs/lib/qmfsquery"
 	"github.com/steinarvk/qmfs/lib/qmfsshard"
-	"github.com/steinarvk/qmfs/lib/sqlitedb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 

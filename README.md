@@ -52,9 +52,11 @@ inspecting the BATS tests in the test/ directory.
 
 qmfs was written by me, Steinar V. Kaldager.
 
-This is a hobby project written primarily for my own usage.
-Don't expect support for it. It was developed in my spare
-time and is not affiliated with any employer of mine.
+This is a hobby project that I wrote primarily for my own
+usage several years before publication. It is no longer
+actively maintained, you probably shouldn't use it and,
+and you definitely shouldn't expect support for it.
+Not affiliated with any employer of mine past or present.
 
 It is released as open source under the MIT license. Feel
 free to make use of it however you wish under the terms

@@ -148,6 +148,8 @@ func init() {
 			return err
 		}
 
+        t0 := time.Now()
+		logrus.Infof("Opening database %q", pathLocalDB)
 		db, err := qmfsdb.Open(ctx, pathLocalDB, &qmfsdb.Options{
 			ChangeHook: func() { watcher.OnChange() },
 		})
@@ -159,7 +161,8 @@ func init() {
 				logrus.Fatalf("Error closing database %q: %v", localdb, err)
 			}
 		}()
-		logrus.Infof("Successfully opened database.")
+        timeToOpen := time.Since(t0)
+		logrus.Infof("Successfully opened database (after %v).", timeToOpen)
 
 		pb.RegisterQMetadataServiceServer(orcgrpcserver.M.Server, db)
 
@@ -262,7 +265,6 @@ func init() {
 			mountpoint,
 			fuse.FSName(localdb),
 			fuse.Subtype("qmfs"),
-			fuse.LocalVolume(),
 		)
 		if err != nil {
 			logrus.Fatalf("Failed to set up fuse mount on %q: %v", mountpoint, err)
@@ -272,11 +274,6 @@ func init() {
 				fuseConn.Close()
 			}
 		}()
-
-		<-fuseConn.Ready
-		if err := fuseConn.MountError; err != nil {
-			logrus.Fatalf("Mount error: %v", err)
-		}
 
 		watcher.OnChange()
 
